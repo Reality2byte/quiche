@@ -175,7 +175,7 @@ where
 
                 // Try to clear all received packets every so often, because
                 // incoming packets contain acks, and because the
-                // recieve queue has a very limited size, once it is full incoming
+                // receive queue has a very limited size, once it is full incoming
                 // packets get stalled indefinitely
                 let mut did_recv = false;
                 while let Some(pkt) = ctx
@@ -528,6 +528,8 @@ where
                     current_send_buf,
                     self.write_state.segment_size,
                     self.write_state.tx_time,
+                    self.metrics
+                        .write_errors(labels::QuicWriteError::WouldBlock),
                 )
                 .await
             } else {
