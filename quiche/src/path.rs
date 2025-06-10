@@ -170,6 +170,14 @@ pub struct Path {
     /// Total number of packets sent with data retransmitted from this path.
     pub retrans_count: usize,
 
+    /// Total number of times PTO (probe timeout) fired.
+    ///
+    /// Loss usually happens in a burst so the number of packets lost will
+    /// depend on the volume of inflight packets at the time of loss (which
+    /// can be arbitrary). PTO count measures the number of loss events and
+    /// provides a normalized loss metric.
+    pub total_pto_count: usize,
+
     /// Number of DATAGRAM frames sent on this path.
     pub dgram_sent_count: usize,
 
@@ -245,6 +253,7 @@ impl Path {
             sent_count: 0,
             recv_count: 0,
             retrans_count: 0,
+            total_pto_count: 0,
             dgram_sent_count: 0,
             dgram_recv_count: 0,
             sent_bytes: 0,
@@ -481,6 +490,9 @@ impl Path {
             }
         }
 
+        // Track PTO timeout event
+        self.total_pto_count += 1;
+
         outcome
     }
 
@@ -500,6 +512,7 @@ impl Path {
             sent: self.sent_count,
             lost: self.recovery.lost_count(),
             retrans: self.retrans_count,
+            total_pto_count: self.total_pto_count,
             dgram_recv: self.dgram_recv_count,
             dgram_sent: self.dgram_sent_count,
             rtt: self.recovery.rtt(),
@@ -515,6 +528,10 @@ impl Path {
             delivery_rate: self.recovery.delivery_rate().to_bytes_per_second(),
             startup_exit: self.recovery.startup_exit(),
         }
+    }
+
+    pub fn bytes_in_flight_duration(&self) -> time::Duration {
+        self.recovery.bytes_in_flight_duration()
     }
 }
 
@@ -663,13 +680,13 @@ impl PathMap {
 
     /// Returns an iterator over all existing paths.
     #[inline]
-    pub fn iter(&self) -> slab::Iter<Path> {
+    pub fn iter(&self) -> slab::Iter<'_, Path> {
         self.paths.iter()
     }
 
     /// Returns a mutable iterator over all existing paths.
     #[inline]
-    pub fn iter_mut(&mut self) -> slab::IterMut<Path> {
+    pub fn iter_mut(&mut self) -> slab::IterMut<'_, Path> {
         self.paths.iter_mut()
     }
 
@@ -889,6 +906,14 @@ pub struct PathStats {
 
     /// The number of sent QUIC packets with retransmitted data.
     pub retrans: usize,
+
+    /// The number of times PTO (probe timeout) fired.
+    ///
+    /// Loss usually happens in a burst so the number of packets lost will
+    /// depend on the volume of inflight packets at the time of loss (which
+    /// can be arbitrary). PTO count measures the number of loss events and
+    /// provides a normalized loss metric.
+    pub total_pto_count: usize,
 
     /// The number of DATAGRAM frames received.
     pub dgram_recv: usize,

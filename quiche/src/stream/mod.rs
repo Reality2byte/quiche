@@ -493,6 +493,12 @@ impl<F: BufFactory> StreamMap<F> {
         self.local_max_streams_bidi = self.local_max_streams_bidi_next;
     }
 
+    /// Sets the max_streams_bidi limit to the given value.
+    pub fn set_max_streams_bidi(&mut self, max: u64) {
+        self.local_max_streams_bidi = max;
+        self.local_max_streams_bidi_next = max;
+    }
+
     /// Returns the current max_streams_bidi limit.
     pub fn max_streams_bidi(&self) -> u64 {
         self.local_max_streams_bidi
@@ -575,17 +581,17 @@ impl<F: BufFactory> StreamMap<F> {
     }
 
     /// Creates an iterator over streams that need to send STREAM_DATA_BLOCKED.
-    pub fn blocked(&self) -> hash_map::Iter<u64, u64> {
+    pub fn blocked(&self) -> hash_map::Iter<'_, u64, u64> {
         self.blocked.iter()
     }
 
     /// Creates an iterator over streams that need to send RESET_STREAM.
-    pub fn reset(&self) -> hash_map::Iter<u64, (u64, u64)> {
+    pub fn reset(&self) -> hash_map::Iter<'_, u64, (u64, u64)> {
         self.reset.iter()
     }
 
     /// Creates an iterator over streams that need to send STOP_SENDING.
-    pub fn stopped(&self) -> hash_map::Iter<u64, u64> {
+    pub fn stopped(&self) -> hash_map::Iter<'_, u64, u64> {
         self.stopped.iter()
     }
 

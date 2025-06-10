@@ -145,6 +145,11 @@ impl AsSocketStats for QuicConnectionStats {
                 .as_ref()
                 .map(|p| p.cwnd as u64)
                 .unwrap_or_default(),
+            total_pto_count: self
+                .path_stats
+                .as_ref()
+                .map(|p| p.total_pto_count as u64)
+                .unwrap_or_default(),
             packets_sent: self.stats.sent as u64,
             packets_recvd: self.stats.recv as u64,
             packets_lost: self.stats.lost as u64,
@@ -166,6 +171,10 @@ impl AsSocketStats for QuicConnectionStats {
                 .as_ref()
                 .and_then(|p| p.startup_exit)
                 .map(QuicConnectionStats::startup_exit_to_socket_stats),
+            bytes_in_flight_duration_us: self
+                .stats
+                .bytes_in_flight_duration
+                .as_micros() as u64,
         }
     }
 }

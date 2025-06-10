@@ -175,7 +175,7 @@ where
 
                 // Try to clear all received packets every so often, because
                 // incoming packets contain acks, and because the
-                // recieve queue has a very limited size, once it is full incoming
+                // receive queue has a very limited size, once it is full incoming
                 // packets get stalled indefinitely
                 let mut did_recv = false;
                 while let Some(pkt) = ctx
@@ -528,6 +528,8 @@ where
                     current_send_buf,
                     self.write_state.segment_size,
                     self.write_state.tx_time,
+                    self.metrics
+                        .write_errors(labels::QuicWriteError::WouldBlock),
                 )
                 .await
             } else {
@@ -763,6 +765,19 @@ where
     pub(crate) async fn run<A: ApplicationOverQuic>(
         mut self, mut qconn: QuicheConnection, mut ctx: ConnectionStageContext<A>,
     ) -> Closing<Tx, M, A> {
+        // Perform a single call to process_reads()/process_writes(),
+        // unconditionally, to ensure that any application data (e.g.
+        // STREAM frames or datagrams) processed by the Handshake
+        // stage are properly passed to the application.
+        if let Err(e) = self.conn_stage.on_read(true, &mut qconn, &mut ctx) {
+            return Closing {
+                params: self.into(),
+                context: ctx,
+                work_loop_result: Err(e),
+                qconn,
+            };
+        };
+
         let work_loop_result = self.work_loop(&mut qconn, &mut ctx).await;
 
         Closing {

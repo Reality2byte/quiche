@@ -2552,6 +2552,81 @@ impl<F: BufFactory> Connection<F> {
         Ok(())
     }
 
+    /// Sets the `max_idle_timeout` transport parameter, in milliseconds.
+    ///
+    /// This function can only be called inside one of BoringSSL's handshake
+    /// callbacks, before any packet has been sent. Calling this function any
+    /// other time will have no effect.
+    ///
+    /// See [`Config::set_max_idle_timeout()`].
+    ///
+    /// [`Config::set_max_idle_timeout()`]: struct.Config.html#method.set_max_idle_timeout
+    #[cfg(feature = "boringssl-boring-crate")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-boring-crate")))]
+    pub fn set_max_idle_timeout_in_handshake(
+        ssl: &mut boring::ssl::SslRef, v: u64,
+    ) -> Result<()> {
+        let ex_data = tls::ExData::from_ssl_ref(ssl).ok_or(Error::TlsFail)?;
+
+        ex_data.local_transport_params.max_idle_timeout = v;
+
+        Self::set_transport_parameters_in_hanshake(
+            ex_data.local_transport_params.clone(),
+            ex_data.is_server,
+            ssl,
+        )
+    }
+
+    /// Sets the `initial_max_streams_bidi` transport parameter.
+    ///
+    /// This function can only be called inside one of BoringSSL's handshake
+    /// callbacks, before any packet has been sent. Calling this function any
+    /// other time will have no effect.
+    ///
+    /// See [`Config::set_initial_max_streams_bidi()`].
+    ///
+    /// [`Config::set_initial_max_streams_bidi()`]: struct.Config.html#method.set_initial_max_streams_bidi
+    #[cfg(feature = "boringssl-boring-crate")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-boring-crate")))]
+    pub fn set_initial_max_streams_bidi_in_handshake(
+        ssl: &mut boring::ssl::SslRef, v: u64,
+    ) -> Result<()> {
+        let ex_data = tls::ExData::from_ssl_ref(ssl).ok_or(Error::TlsFail)?;
+
+        ex_data.local_transport_params.initial_max_streams_bidi = v;
+
+        Self::set_transport_parameters_in_hanshake(
+            ex_data.local_transport_params.clone(),
+            ex_data.is_server,
+            ssl,
+        )
+    }
+
+    #[cfg(feature = "boringssl-boring-crate")]
+    fn set_transport_parameters_in_hanshake(
+        params: TransportParams, is_server: bool, ssl: &mut boring::ssl::SslRef,
+    ) -> Result<()> {
+        use foreign_types_shared::ForeignTypeRef;
+
+        // In order to apply the new parameter to the TLS state before TPs are
+        // written into a TLS message, we need to re-encode all TPs immediately.
+        //
+        // Since we don't have direct access to the main `Connection` object, we
+        // need to re-create the `Handshake` state from the `SslRef`.
+        //
+        // SAFETY: the `Handshake` object must not be drop()ed, otherwise it
+        // would free the underlying BoringSSL structure.
+        let mut handshake =
+            unsafe { tls::Handshake::from_ptr(ssl.as_ptr() as _) };
+        handshake.set_quic_transport_params(&params, is_server)?;
+
+        // Avoid running `drop(handshake)` as that would free the underlying
+        // handshake state.
+        std::mem::forget(handshake);
+
+        Ok(())
+    }
+
     /// Processes QUIC packets received from the peer.
     ///
     /// On success the number of bytes processed from the input buffer is
@@ -6873,7 +6948,7 @@ impl<F: BufFactory> Connection<F> {
     /// Note that the value returned can change throughout the connection's
     /// lifetime.
     #[inline]
-    pub fn source_id(&self) -> ConnectionId {
+    pub fn source_id(&self) -> ConnectionId<'_> {
         if let Ok(path) = self.paths.get_active() {
             if let Some(active_scid_seq) = path.active_scid_seq {
                 if let Ok(e) = self.ids.get_scid(active_scid_seq) {
@@ -6891,7 +6966,7 @@ impl<F: BufFactory> Connection<F> {
     /// An iterator is returned for all active IDs (i.e. ones that have not
     /// been explicitly retired yet).
     #[inline]
-    pub fn source_ids(&self) -> impl Iterator<Item = &ConnectionId> {
+    pub fn source_ids(&self) -> impl Iterator<Item = &ConnectionId<'_>> {
         self.ids.scids_iter()
     }
 
@@ -6900,7 +6975,7 @@ impl<F: BufFactory> Connection<F> {
     /// Note that the value returned can change throughout the connection's
     /// lifetime.
     #[inline]
-    pub fn destination_id(&self) -> ConnectionId {
+    pub fn destination_id(&self) -> ConnectionId<'_> {
         if let Ok(path) = self.paths.get_active() {
             if let Some(active_dcid_seq) = path.active_dcid_seq {
                 if let Ok(e) = self.ids.get_dcid(active_dcid_seq) {
@@ -7038,7 +7113,22 @@ impl<F: BufFactory> Connection<F> {
             reset_stream_count_remote: self.reset_stream_remote_count,
             stopped_stream_count_remote: self.stopped_stream_remote_count,
             path_challenge_rx_count: self.path_challenge_rx_count,
+            bytes_in_flight_duration: self.bytes_in_flight_duration(),
         }
+    }
+
+    /// Returns the sum of the durations when each path in the
+    /// connection was actively sending bytes or waiting for acks.
+    /// Note that this could result in a duration that is longer than
+    /// the actual connection duration in cases where multiple paths
+    /// are active for extended periods of time.  In practice only 1
+    /// path is typically active at a time.
+    /// TODO revisit computation if in the future multiple paths are
+    /// often active at the same time.
+    fn bytes_in_flight_duration(&self) -> Duration {
+        self.paths.iter().fold(Duration::ZERO, |acc, (_, path)| {
+            acc + path.bytes_in_flight_duration()
+        })
     }
 
     /// Returns reference to peer's transport parameters. Returns `None` if we
@@ -7063,17 +7153,10 @@ impl<F: BufFactory> Connection<F> {
     }
 
     fn encode_transport_params(&mut self) -> Result<()> {
-        let mut raw_params = [0; 128];
-
-        let raw_params = TransportParams::encode(
+        self.handshake.set_quic_transport_params(
             &self.local_transport_params,
             self.is_server,
-            &mut raw_params,
-        )?;
-
-        self.handshake.set_quic_transport_params(raw_params)?;
-
-        Ok(())
+        )
     }
 
     fn parse_peer_transport_params(
@@ -7190,6 +7273,8 @@ impl<F: BufFactory> Connection<F> {
 
             trace_id: &self.trace_id,
 
+            local_transport_params: self.local_transport_params.clone(),
+
             recovery_config: self.recovery_config,
 
             tx_cap_factor: self.tx_cap_factor,
@@ -7226,6 +7311,19 @@ impl<F: BufFactory> Connection<F> {
                             discover,
                             self.recovery_config.max_send_udp_payload_size,
                         );
+                    }
+
+                    if ex_data.local_transport_params !=
+                        self.local_transport_params
+                    {
+                        self.streams.set_max_streams_bidi(
+                            ex_data
+                                .local_transport_params
+                                .initial_max_streams_bidi,
+                        );
+
+                        self.local_transport_params =
+                            ex_data.local_transport_params;
                     }
                 }
 
@@ -8487,6 +8585,10 @@ pub struct Stats {
 
     /// The total number of PATH_CHALLENGE frames that were received.
     pub path_challenge_rx_count: u64,
+
+    /// Total duration during which this side of the connection was
+    /// actively sending bytes or waiting for those bytes to be acked.
+    pub bytes_in_flight_duration: Duration,
 }
 
 impl std::fmt::Debug for Stats {
@@ -15287,12 +15389,14 @@ mod tests {
         // Client sends Initial packet.
         let (len, _) = pipe.client.send(&mut buf).unwrap();
         assert_eq!(len, 1200);
+        assert_eq!(pipe.client.path_stats().next().unwrap().total_pto_count, 0);
 
         // Wait for PTO to expire.
         let timer = pipe.client.timeout().unwrap();
         std::thread::sleep(timer + time::Duration::from_millis(1));
 
         pipe.client.on_timeout();
+        assert_eq!(pipe.client.path_stats().next().unwrap().total_pto_count, 1);
 
         let epoch = packet::Epoch::Initial;
         assert_eq!(
@@ -15323,6 +15427,7 @@ mod tests {
         std::thread::sleep(timer + time::Duration::from_millis(1));
 
         pipe.client.on_timeout();
+        assert_eq!(pipe.client.path_stats().next().unwrap().total_pto_count, 2);
 
         assert_eq!(
             pipe.client
@@ -16547,6 +16652,8 @@ mod tests {
         let mut buf = [0; 65535];
 
         const CUSTOM_INITIAL_CONGESTION_WINDOW_PACKETS: usize = 30;
+        const CUSTOM_INITIAL_MAX_STREAMS_BIDI: u64 = 30;
+        const CUSTOM_MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(3);
 
         // Manually construct `SslContextBuilder` for the server so we can modify
         // CWND during the handshake.
@@ -16566,6 +16673,18 @@ mod tests {
             <Connection>::set_initial_congestion_window_packets_in_handshake(
                 hello.ssl_mut(),
                 CUSTOM_INITIAL_CONGESTION_WINDOW_PACKETS,
+            )
+            .unwrap();
+
+            <Connection>::set_max_idle_timeout_in_handshake(
+                hello.ssl_mut(),
+                CUSTOM_MAX_IDLE_TIMEOUT.as_millis() as u64,
+            )
+            .unwrap();
+
+            <Connection>::set_initial_max_streams_bidi_in_handshake(
+                hello.ssl_mut(),
+                CUSTOM_INITIAL_MAX_STREAMS_BIDI,
             )
             .unwrap();
 
@@ -16616,9 +16735,19 @@ mod tests {
             CUSTOM_INITIAL_CONGESTION_WINDOW_PACKETS * 1200
         );
 
+        assert_eq!(pipe.server.idle_timeout(), Some(CUSTOM_MAX_IDLE_TIMEOUT));
+
         // Server sends initial flight.
         let (len, _) = pipe.server.send(&mut buf).unwrap();
         pipe.client_recv(&mut buf[..len]).unwrap();
+
+        // Ensure the client received the new transport parameters.
+        assert_eq!(pipe.client.idle_timeout(), Some(CUSTOM_MAX_IDLE_TIMEOUT));
+
+        assert_eq!(
+            pipe.client.peer_streams_left_bidi(),
+            CUSTOM_INITIAL_MAX_STREAMS_BIDI
+        );
 
         assert_eq!(pipe.handshake(), Ok(()));
 
